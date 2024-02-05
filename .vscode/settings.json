@@ -1,0 +1,8 @@
+{
+    // "rust-analyzer.cargo.features": [
+    //     "stm32-usbd",
+    //     "stm32f042"
+    // ],
+    "rust-analyzer.check.allTargets": false,
+    "rust-analyzer.cargo.target": "thumbv6m-none-eabi"
+}
