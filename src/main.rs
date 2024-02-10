@@ -1,79 +1,68 @@
 #![no_std]
 #![no_main]
 
-extern crate panic_halt;
-
-use cortex_m_rt::entry;
-
 use defmt::info;
-use defmt_rtt as _;
+use embassy_executor::Spawner;
+use embassy_futures::join::join;
+use embassy_stm32::{bind_interrupts, peripherals, time::mhz, usb, Config};
+use embassy_usb::class::cdc_acm;
+use {defmt_rtt as _, panic_probe as _};
 
-use stm32f0xx_hal as hal;
+bind_interrupts!(struct Irqs {
+    USB =>usb::InterruptHandler<peripherals::USB>;
+});
 
-use hal::usb::{Peripheral, UsbBus};
-use hal::{pac, prelude::*};
-use usb_device::prelude::*;
-use usbd_serial::{SerialPort, USB_CLASS_CDC};
-
-mod usb;
-
-fn init_usb() {
-
+#[embassy_executor::task]
+async fn usb() {
+    loop {
+        
+    }
 }
 
-#[entry]
-fn main() -> ! {
-    let mut dp = pac::Peripherals::take().unwrap();
-    hal::usb::remap_pins(&mut dp.RCC, &mut dp.SYSCFG);
-    let mut rcc = dp
-        .RCC
-        .configure()
-        .hsi48()
-        .enable_crs(dp.CRS)
-        .sysclk(48.mhz())
-        .pclk(24.mhz())
-        .freeze(&mut dp.FLASH);
+#[embassy_executor::main]
+async fn main(_spawner: Spawner) {
+    let mut mcu_config: Config = Default::default();
+    let rcc = &mut mcu_config.rcc;
+    rcc.hse = Some(mhz(8));
+    rcc.bypass_hse = false;
+    rcc.usb_pll = true;
+    rcc.hsi48 = false;
+    rcc.sys_ck = Some(mhz(48));
+    rcc.hclk = Some(mhz(48));
+    rcc.pclk = Some(mhz(48));
+    let p = embassy_stm32::init(mcu_config);
 
-    let gpioa = dp.GPIOA.split(&mut rcc);
-    let usb = Peripheral {
-        usb: dp.USB,
-        pin_dm: gpioa.pa11,
-        pin_dp: gpioa.pa12,
+    let usb_driver = embassy_stm32::usb::Driver::new(p.USB, Irqs, p.PA12, p.PA11);
+    let usb_config = embassy_usb::Config::new(0xc0de, 0xcafe);
+
+    let mut device_descriptor = [0; 256];
+    let mut config_descriptor = [0; 256];
+    let mut bos_descriptor = [0; 256];
+    let mut control_buf = [0; 7];
+
+    let mut usb_state = cdc_acm::State::new();
+    let mut usb_builder = embassy_usb::Builder::new(
+        usb_driver,
+        usb_config,
+        &mut device_descriptor,
+        &mut config_descriptor,
+        &mut bos_descriptor,
+        &mut [], // no msos descriptors
+        &mut control_buf,
+    );
+
+    let mut class = cdc_acm::CdcAcmClass::new(&mut usb_builder, &mut usb_state, 64);
+    let mut usb = usb_builder.build();
+
+    let usb_fut = usb.run();
+
+    let echo_fut = async {
+        loop {
+            class.wait_connection().await;
+            info!("Connected");
+            // let _ = echo(&mut class).await;
+            // info!("Disconnected");
+        }
     };
-    let usb_bus = UsbBus::new(usb);
-    let mut serial = SerialPort::new(&usb_bus);
-    let mut usb_dev = UsbDeviceBuilder::new(&usb_bus, UsbVidPid(0x16c0, 0x27dd))
-        .manufacturer("idm")
-        .product("idm")
-        .serial_number("TEST")
-        .device_class(USB_CLASS_CDC)
-        .build();
-    loop {
-        if !usb_dev.poll(&mut [&mut serial]) {
-            continue;
-        }
-        let mut buf = [0u8; 64];
-        match serial.read(&mut buf) {
-            Ok(count) if count > 0 => {
-                // Echo back in upper case
-                for c in buf[0..count].iter_mut() {
-                    if 0x61 <= *c && *c <= 0x7a {
-                        *c &= !0x20;
-                    }
-                }
-
-                info!("recv");
-                let mut write_offset = 0;
-                while write_offset < count {
-                    match serial.write(&buf[write_offset..count]) {
-                        Ok(len) if len > 0 => {
-                            write_offset += len;
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
+    join(usb_fut, echo_fut).await;
 }
